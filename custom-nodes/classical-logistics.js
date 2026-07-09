@@ -17,7 +17,12 @@
  * Reading: docs/planning-primer.md §"Classical search and the cost of optimality"
  */
 
-// Inputs are merged upstream — shipping requests AND the catalogue of options.
+// $input here is whichever items the upstream IF node routed as needing the
+// classical fallback -- but those items are the LLM node's raw response
+// envelopes (id/model/content/...), not the original request/option objects.
+// We only use $input to know WHICH request_ids were flagged; the actual
+// request and option data is re-pulled from Build Shipping Requests, which
+// still has the original { type: "request" | "option", ... } shape.
 //
 // A request: { type: "request", request_id, weight_kg, origin_region,
 //              dest_region, deadline_days, perishable }
@@ -25,8 +30,20 @@
 //              destination_region, transit_days, cost_per_kg,
 //              max_weight_kg, supports_perishable }
 
-const all = $input.all().map(i => i.json);
-const requests = all.filter(x => x.type === "request");
+const flaggedRequestIds = new Set(
+  $input.all()
+    .map(i => {
+      try {
+        return JSON.parse(i.json.content[0].text).request_id;
+      } catch (e) {
+        return null;
+      }
+    })
+    .filter(id => id !== null)
+);
+
+const all = $('Build Shipping Requests').all().map(i => i.json);
+const requests = all.filter(x => x.type === "request" && flaggedRequestIds.has(x.request_id));
 const options  = all.filter(x => x.type === "option");
 
 // ---- TODO — greedy carrier assignment -------------------------------------
@@ -58,8 +75,18 @@ const options  = all.filter(x => x.type === "option");
  * the LLM branch, not because we couldn't afford the optimal search.
  */
 function pickCheapestFeasible(req, options) {
-  // TODO [hard] — LO-2: classical search baselines
-  throw new Error("TODO [hard]: implement pickCheapestFeasible()");
+  const feasible = options.filter(o =>
+    o.origin_region === req.origin_region &&
+    o.destination_region === req.dest_region &&
+    o.transit_days <= req.deadline_days &&
+    o.max_weight_kg >= req.weight_kg &&
+    (!req.perishable || o.supports_perishable)
+  );
+
+  if (feasible.length === 0) return null;
+
+  const priced = feasible.map(o => ({ ...o, total_cost_usd: req.weight_kg * o.cost_per_kg }));
+  return priced.reduce((best, o) => (o.total_cost_usd < best.total_cost_usd ? o : best));
 }
 
 // ---- Main loop (provided) -------------------------------------------------

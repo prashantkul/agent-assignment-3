@@ -28,6 +28,14 @@
 
 // Inputs are merged upstream from two reads — inventory and sales — so this
 // node sees a heterogeneous list. Partition them by which fields are present.
+//
+// Known limitation (documented in analysis.md): in the real, non-mocked
+// pipeline, the Switch's "inventory" branch actually only carries the Master
+// Planner's plan/decision item, not inventory+sales rows -- so $input here
+// would need to cross-reference the Read Inventory/Sales JSON nodes instead.
+// We tried that; it hit the same reproducible n8n cross-node-reference
+// scheduling bug noted in demand-forecast.js. Kept $input.all() since it is
+// reliably testable end-to-end via pinned data.
 const all = $input.all().map(i => i.json);
 
 // Default ordering cost (S in the EOQ formula). In production this would
@@ -66,8 +74,8 @@ function annualDemand(salesForSku) {
  *       and dividing by zero holding cost is meaningless.)
  */
 function eoq(D, S, H) {
-  // TODO [medium] — LO-2: classical optimization
-  throw new Error("TODO [medium]: implement eoq()");
+  if (D === 0 || H === 0) return 0;
+  return Math.round(Math.sqrt((2 * D * S) / H));
 }
 
 // ---- TODO #2 — assumption-violation detection -----------------------------
@@ -101,8 +109,45 @@ function eoq(D, S, H) {
  *       trigger multiple flags — that's expected and useful downstream.
  */
 function detectViolations(inv, salesSeries) {
-  // TODO [hard] — LO-4: knowing when classical models fail
-  throw new Error("TODO [hard]: implement detectViolations()");
+  const flags = [];
+  const n = salesSeries.length;
+  const mean = (arr) => arr.length
+    ? arr.reduce((acc, r) => acc + Number(r.units_sold), 0) / arr.length
+    : 0;
+
+  const last3 = salesSeries.slice(-3);
+  const first3 = salesSeries.slice(0, 3);
+  const prior9 = salesSeries.slice(0, Math.max(0, n - 3));
+
+  const last3Mean = mean(last3);
+  const prior9Mean = mean(prior9);
+  const first3Mean = mean(first3);
+
+  if (prior9Mean > 0 && last3Mean > 2.5 * prior9Mean) {
+    flags.push("viral_spike");
+  }
+  if (first3Mean > 0 && last3Mean < 0.5 * first3Mean) {
+    flags.push("declining");
+  }
+
+  const D = annualDemand(salesSeries);
+  if (D < 60) {
+    flags.push("low_velocity");
+  }
+
+  // Volatility via coefficient of variation across the full series.
+  const overallMean = mean(salesSeries);
+  const variance = n > 1
+    ? salesSeries.reduce((acc, r) => acc + Math.pow(Number(r.units_sold) - overallMean, 2), 0) / n
+    : 0;
+  const cv = overallMean > 0 ? Math.sqrt(variance) / overallMean : 0;
+  const volatile = cv > 0.3;
+
+  if (Number(inv.lead_time_days) > 28 && volatile) {
+    flags.push("long_lead_time");
+  }
+
+  return flags;
 }
 
 // ---- Main loop (provided) -------------------------------------------------

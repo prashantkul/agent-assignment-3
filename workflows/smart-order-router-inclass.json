@@ -273,6 +273,7 @@
             }
           ]
         },
+        "includeOtherFields": true,
         "options": {}
       }
     },

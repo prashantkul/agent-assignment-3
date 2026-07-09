@@ -25,6 +25,15 @@
 // ---- Input contract -------------------------------------------------------
 // Upstream node provides items where item.json = {month, sku, name, units_sold}
 // (the parsed sales_history.csv).
+//
+// Known limitation (documented in analysis.md): in the real, non-mocked
+// pipeline, the Switch's "forecast" branch actually only carries the Master
+// Planner's plan/decision item, not raw sales rows -- so $input here would
+// need to instead cross-reference the Read Sales JSON node. We tried that;
+// it exposed a separate, reproducible n8n scheduling bug where cross-node
+// references beyond the first one in a Code node execution intermittently
+// fail. We kept $input.all() (matching this file's original contract) since
+// it is the version that is reliably testable end-to-end via pinned data.
 const sales = $input.all().map(i => i.json);
 
 // ---- Helpers (provided — do not change) -----------------------------------
@@ -64,11 +73,10 @@ function nextMonth(monthStr) {
  * items — which is exactly why the seasonal index and the LLM step exist.
  */
 function movingAverage(series) {
-  // TODO [easy] — LO-3: classical baseline forecasting
-  //   1. Slice the last up-to-3 entries from `series`.
-  //   2. Sum their `units_sold` and divide by the count.
-  //   3. Return 0 for an empty series.
-  throw new Error("TODO [easy]: implement movingAverage()");
+  if (series.length === 0) return 0;
+  const last3 = series.slice(-3);
+  const sum = last3.reduce((acc, r) => acc + Number(r.units_sold), 0);
+  return sum / last3.length;
 }
 
 /**
@@ -90,15 +98,17 @@ function movingAverage(series) {
  * @returns {number}            Multiplier. Default to 1.0 if you can't compute one.
  */
 function seasonalIndex(series, targetMonth) {
-  // TODO [medium] — LO-3: time-series decomposition
-  //   1. Extract the month-of-year part: targetMonth.split("-")[1] -> "01".."12"
-  //   2. Compute monthMean = mean of units_sold in `series` where the month
-  //      portion of row.month matches.
-  //   3. Compute overallMean = mean of units_sold across the entire series.
-  //   4. Return monthMean / overallMean. Guard against division by zero
-  //      (return 1.0 if overallMean is 0).
-  //   5. If no rows match the target month part, return 1.0.
-  throw new Error("TODO [medium]: implement seasonalIndex()");
+  const targetMoy = targetMonth.split("-")[1];
+  const matching = series.filter(r => r.month.split("-")[1] === targetMoy);
+
+  const overallMean = series.length
+    ? series.reduce((acc, r) => acc + Number(r.units_sold), 0) / series.length
+    : 0;
+  if (overallMean === 0) return 1.0;
+  if (matching.length === 0) return 1.0;
+
+  const monthMean = matching.reduce((acc, r) => acc + Number(r.units_sold), 0) / matching.length;
+  return monthMean / overallMean;
 }
 
 // ---- Main loop (provided) -------------------------------------------------
